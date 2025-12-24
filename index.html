@@ -1,0 +1,1233 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <title>Merry Christmas NHI</title>
+    
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@100;200;800&family=Dancing+Script:wght@400;700&family=Pacifico&display=swap" rel="stylesheet">
+
+    <script src="js/three.min.js"></script>
+    <script src="js/tween.umd.js"></script>
+    <script src="js/hands.js"></script>
+
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #020205; font-family: 'Segoe UI', sans-serif; user-select: none; }
+        
+        #hud {
+            position: absolute; top: 20px; left: 20px; color: #eee;
+            background: rgba(0,0,0,0.85); padding: 20px; border-radius: 12px;
+            pointer-events: none; border-left: 5px solid #FFD700; 
+            backdrop-filter: blur(10px); font-size: 15px;
+            line-height: 1.6; z-index: 10; min-width: 320px;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.5);
+        }
+        #hud h3 { margin: 0 0 10px 0; color: #FFD700; text-transform: uppercase; font-size: 18px; border-bottom: 1px solid #555; padding-bottom: 5px; }
+        .mode-badge {
+            position: absolute; top: 20px; right: 20px;
+            padding: 15px 30px; border-radius: 12px; font-weight: bold; font-size: 20px;
+            background: #111; color: #fff; border: 3px solid #00FF00;
+            text-transform: uppercase; letter-spacing: 1px; z-index: 10;
+            box-shadow: 0 0 30px rgba(0, 255, 0, 0.3);
+        }
+        #loader { 
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); 
+            color: #FFD700; font-size: 1.5em; letter-spacing: 2px; font-weight: bold; text-align: center;
+        }
+        #img-status { margin-top:10px; display:flex; gap:8px; align-items:center; }
+        #hud, .mode-badge { display: none !important; }
+    </style>
+</head>
+<body>
+
+    <div id="loader"></div>
+
+    <div id="hud">
+        <div id="img-status"></div>
+    </div>
+
+    <div id="status-hand" class="mode-badge">ĐANG TÌM TAY...</div>
+    <video id="video-element" playsinline style="display:none"></video>
+
+    <script>
+        // --- CẤU HÌNH ---
+        const CONFIG = {
+            rotationSpeed: 0.05, particleExplodeRadius: 550, circleRadius: 350,
+            treeBaseY: -180, treeHighY: 50, boxHoverY: -50,
+            boxCircleDistance: 300, boxCircleRadius: 420, boxCircleYOffset: 0,
+            boxScaleTarget: 0.35, 
+            boxSelectScale: 1.6,
+            boxOrbitSpeed: 0.5, 
+            boxTilt: 0.5,
+            driftAmp: 30, driftSpeed: 0.0015, blinkSpeed: 3.0, baseLightIntensity: 1.8,
+            runLightSpeed: 0.01, runLightSize: 0.06
+        };
+
+        const IMAGE_URLS = ['img/anhmot.jpg', 'img/anhhai.jpg', 'img/anhba.jpg', 'img/anhbon.jpg', 'img/anhnam.jpg'];
+        const BOX_COLORS = [0xFF0000, 0x00FF00, 0x5555FF, 0xFFFF00, 0xFF00FF];
+
+        // 1. SETUP
+        const scene = new THREE.Scene(); scene.fog = new THREE.FogExp2(0x020205, 0.0008);
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 1, 8000);
+        camera.position.set(0, 50, 900);
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance" });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1));
+        renderer.sortObjects = true;
+        try { renderer.outputEncoding = THREE.sRGBEncoding; } catch(e) {}
+        document.body.appendChild(renderer.domElement);
+
+        const treeGroup = new THREE.Group(); treeGroup.position.y = CONFIG.treeBaseY; 
+        treeGroup.renderOrder = 1; 
+        scene.add(treeGroup);
+        const texLoader = new THREE.TextureLoader().setCrossOrigin('anonymous');
+
+        const cameraOverlayGroup = new THREE.Group(); camera.add(cameraOverlayGroup); scene.add(camera);
+        const _whiteTex = (()=>{ const c=document.createElement('canvas'); c.width=1; c.height=1; const cx=c.getContext('2d'); cx.fillStyle = '#ffffff'; cx.fillRect(0,0,1,1); const t=new THREE.Texture(c); t.needsUpdate=true; return t; })();
+        const overlayMat = new THREE.ShaderMaterial({
+            uniforms: { uMap: { value: _whiteTex }, brightness: { value: 1.4 }, opacity: { value: 0.0 } },
+            vertexShader: `varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,
+            fragmentShader: `uniform sampler2D uMap; uniform float brightness; uniform float opacity; varying vec2 vUv; void main(){ vec4 c = texture2D(uMap, vUv); c.rgb *= brightness; gl_FragColor = vec4(c.rgb, c.a * opacity); }`,
+            transparent: true, depthTest: false, depthWrite: false, side: THREE.DoubleSide
+        });
+        const overlayPlane = new THREE.Mesh(new THREE.PlaneGeometry(400, 400), overlayMat);
+        overlayPlane.position.set(0, 0, -500);
+        overlayPlane.userData = { currentBoxIndex: -1, flyProgress: 0, flyTarget: 0, startPos: new THREE.Vector3() };
+        overlayPlane.renderOrder = 9999;
+        overlayMat.depthTest = false;
+        cameraOverlayGroup.add(overlayPlane);
+
+        // --- TEXTURES ---
+        const fuzzyTex = (() => { const c=document.createElement('canvas');c.width=32;c.height=32; const ctx=c.getContext('2d'); const g=ctx.createRadialGradient(16,16,0,16,16,16); g.addColorStop(0,'rgba(255,255,255,1)'); g.addColorStop(0.5,'rgba(255,255,255,0.3)'); g.addColorStop(1.0,'rgba(255,255,255,0)'); ctx.fillStyle=g; ctx.fillRect(0,0,32,32); return new THREE.Texture(c); })(); fuzzyTex.needsUpdate=true;
+        
+        const cloudTex = (() => {
+            const c = document.createElement('canvas'); c.width = 64; c.height = 64;
+            const ctx = c.getContext('2d');
+            const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+            g.addColorStop(0, 'rgba(255, 255, 255, 0.5)'); 
+            g.addColorStop(1, 'rgba(255, 255, 255, 0)');    
+            ctx.fillStyle = g; ctx.fillRect(0, 0, 64, 64);
+            return new THREE.Texture(c);
+        })(); cloudTex.needsUpdate = true;
+
+        const sharpBoxTex = (() => { const c=document.createElement('canvas');c.width=32;c.height=32; const ctx=c.getContext('2d'); ctx.fillStyle='rgba(255,255,255,0.95)'; ctx.fillRect(2,2,28,28); return new THREE.Texture(c); })(); sharpBoxTex.needsUpdate=true;
+        const superSoftTex = (() => { const c=document.createElement('canvas');c.width=64;c.height=64; const ctx=c.getContext('2d'); const g=ctx.createRadialGradient(32,32,0,32,32,32); g.addColorStop(0,'rgba(230,194,90,0.95)'); g.addColorStop(0.5,'rgba(230,194,90,0.25)'); g.addColorStop(1,'rgba(0,0,0,0)'); ctx.fillStyle=g; ctx.fillRect(0,0,64,64); return new THREE.Texture(c); })(); superSoftTex.needsUpdate=true;
+        const crispDotTex = (() => {
+            const c = document.createElement('canvas'); c.width = 64; c.height = 64; const ctx = c.getContext('2d');
+            ctx.clearRect(0,0,64,64);
+            ctx.fillStyle = 'rgba(255,255,255,1)'; ctx.beginPath(); ctx.arc(32,32,16,0,Math.PI*2); ctx.fill();
+            const t = new THREE.Texture(c); t.needsUpdate = true; return t;
+        })();
+
+        const createFallbackTexture = (index, colorHex) => {
+            const c = document.createElement('canvas'); c.width = 512; c.height = 512; const ctx = c.getContext('2d');
+            ctx.fillStyle = '#' + colorHex.toString(16).padStart(6, '0'); ctx.fillRect(0,0,512,512);
+            ctx.strokeStyle = '#FFFFFF'; ctx.lineWidth = 20; ctx.strokeRect(20,20,472,472);
+            ctx.font = 'bold 60px Arial'; ctx.fillStyle = '#FFFFFF'; ctx.textAlign = 'center';
+            ctx.fillText("LỖI TẢI ẢNH!", 256, 200); ctx.font = 'bold 40px Arial'; ctx.fillText("Cần chạy Live Server", 256, 280); ctx.fillText(`Hình số: ${index + 1}`, 256, 350);
+            const tex = new THREE.Texture(c); tex.needsUpdate = true; return tex;
+        };
+
+        // 2. OBJECTS
+        let foliageGeometry, foliagePoints, foliageData=[], ribbonGeometry, ribbonPoints, ribbonData=[], starData=[], fillerData=[], starGroup = null, pulseGlow = null, starSprite = null;
+        let _foliageSoft = false, _ribbonSoft = false;
+
+        // --- HỆ THỐNG TẠO CHỮ TỪ HẠT (TEXT PARTICLES) ---
+        let textPoints = [];
+        let floatingSpareTargets = [];
+        let floatingSpareTargetsValid = false;
+        
+        // --- CLEAN VERSION V5: XÓA SẠCH TUYỆT ĐỐI ---
+        const generateTextTargets = () => {
+            const c = document.createElement('canvas');
+            const ctx = c.getContext('2d');
+            const width = 1024;
+            const height = 512;
+            c.width = width;
+            c.height = height;
+
+            // RESET TOÀN BỘ TRANSFORMATION: Đảm bảo không còn lệnh scale(-1) nào tồn tại
+            ctx.setTransform(1, 0, 0, 1, 0, 0); 
+            ctx.clearRect(0, 0, width, height);
+
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            
+            // Dòng 1: Merry Christmas
+            ctx.font = '100px "Pacifico", cursive'; 
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fillText("Merry Christmas", width / 2, height / 2 - 80);
+
+
+            const imgData = ctx.getImageData(0, 0, width, height);
+            const data = imgData.data;
+            const points = [];
+
+            // Quét pixel
+            for (let y = 0; y < height; y += 2.5) {
+                for (let x = 0; x < width; x += 2.5) {
+                    const i = (Math.floor(y) * width + Math.floor(x)) * 4;
+                    if (data[i+3] > 128) { // Nếu pixel không trong suốt
+                        const pX = (x - width / 2) * 1.6; 
+                        const pY = -(y - height / 2) * 1.6; 
+                        const pZ = 0;
+                        const isTopLine = y < height / 2 - 10; 
+
+                        points.push({
+                            vec: new THREE.Vector3(pX, pY, pZ),
+                            isTopLine: isTopLine
+                        });
+                    }
+                }
+            }
+            return points;
+        };
+        const textTargets = generateTextTargets();
+
+        function generateFloatingSpareTargets(count) {
+            const arr = [];
+            for (let i = 0; i < count; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                const radius = 700 + Math.random() * 400;
+                const y = (Math.random() - 0.5) * 700;
+                const x = Math.cos(angle) * radius;
+                const z = Math.sin(angle) * radius;
+                arr.push(new THREE.Vector3(x, y, z));
+            }
+            return arr;
+        }
+
+        // --- HỆ THỐNG KHÓI SAU XE ---
+        const SANTA_SMOKE_COUNT = 600; 
+        let santaSmokePoints = null;
+        const santaSmokeData = []; 
+        let santaSmokeIndex = 0; 
+
+        const initSantaSmoke = () => {
+            const geo = new THREE.BufferGeometry();
+            const pos = new Float32Array(SANTA_SMOKE_COUNT * 3).fill(0); 
+            const sizes = new Float32Array(SANTA_SMOKE_COUNT).fill(0);
+            const cols = new Float32Array(SANTA_SMOKE_COUNT * 3).fill(1); 
+
+            geo.setAttribute('position', new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage));
+            geo.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1).setUsage(THREE.DynamicDrawUsage));
+            geo.setAttribute('color', new THREE.BufferAttribute(cols, 3).setUsage(THREE.DynamicDrawUsage));
+
+            const mat = new THREE.PointsMaterial({
+                size: 25, 
+                map: cloudTex, 
+                transparent: true,
+                opacity: 1,
+                vertexColors: true,
+                blending: THREE.AdditiveBlending, 
+                depthWrite: false
+            });
+            santaSmokePoints = new THREE.Points(geo, mat);
+            santaSmokePoints.frustumCulled = false; 
+            scene.add(santaSmokePoints);
+
+            for(let i=0; i<SANTA_SMOKE_COUNT; i++) {
+                 santaSmokeData[i] = { active: false, age: 0, velocity: new THREE.Vector3() };
+                 pos[i*3+1] = -9999;
+            }
+        };
+
+        const spawnSantaSmoke = (emitterPos) => {
+            const idx = santaSmokeIndex;
+            const data = santaSmokeData[idx];
+            const posAttr = santaSmokePoints.geometry.attributes.position;
+            const sizeAttr = santaSmokePoints.geometry.attributes.aSize;
+
+            data.active = true;
+            data.age = 0; 
+
+            const startX = emitterPos.x + (Math.random() - 0.5) * 35;
+            const startY = emitterPos.y + (Math.random() - 0.5) * 15 - 5; 
+            const startZ = emitterPos.z + (Math.random() - 0.5) * 35;
+
+            posAttr.setXYZ(idx, startX, startY, startZ);
+            sizeAttr.setX(idx, 20 + Math.random() * 20); 
+
+            data.velocity.set(
+                (Math.random() - 0.5) * 2.5, 
+                - (1.5 + Math.random() * 2.5), 
+                (Math.random() - 0.5) * 2.5  
+            );
+
+            santaSmokeIndex = (santaSmokeIndex + 1) % SANTA_SMOKE_COUNT;
+        };
+
+        // --- HỆ THỐNG RƠI TUYẾT ---
+        let snowSystem = null;
+        let snowGeo = null;
+        const createSnow = () => {
+            const snowCount = 1500;
+            snowGeo = new THREE.BufferGeometry();
+            const positions = [];
+            const velocities = [];
+
+            for (let i = 0; i < snowCount; i++) {
+                positions.push(
+                    (Math.random() - 0.5) * 1600,
+                    Math.random() * 1000 - 200,
+                    (Math.random() - 0.5) * 1600
+                );
+                velocities.push(
+                    (Math.random() - 0.5) * 0.5,
+                    -(1.5 + Math.random() * 2.5),
+                    (Math.random() - 0.5) * 0.5
+                );
+            }
+
+            snowGeo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            snowGeo.setAttribute('velocity', new THREE.Float32BufferAttribute(velocities, 3));
+
+            const snowMat = new THREE.PointsMaterial({
+                size: 6.0,
+                map: fuzzyTex,
+                color: 0xFFFFFF,
+                transparent: true,
+                opacity: 0.8,
+                depthWrite: false,
+                blending: THREE.AdditiveBlending
+            });
+
+            snowSystem = new THREE.Points(snowGeo, snowMat);
+            snowSystem.frustumCulled = false;
+            scene.add(snowSystem);
+        };
+
+        // --- ông già ---
+        let santaGroup = new THREE.Group();
+        let santaPoints = null;
+        const santaData = { active: false, t: 0, speed: 0.0010, particles: [] }; 
+
+        const createDetailedSantaTeam = () => {
+            const pos = [], col = [], sizes = [];
+            const c = new THREE.Color();
+            
+            const addPoint = (x, y, z, hexColor, size, type='solid') => {
+                c.setHex(hexColor);
+                pos.push(x, y, z);
+                col.push(c.r, c.g, c.b);
+                sizes.push(size);
+                santaData.particles.push({ baseX: x, baseY: y, baseZ: z, type: type, noiseOffset: Math.random() * 100 });
+            };
+
+            const addLine = (p1, p2, hexColor, sz, sagAmount = 2.0) => {
+                const dist = p1.distanceTo(p2);
+                const steps = Math.ceil(dist / 1.5); 
+                c.setHex(hexColor);
+                for(let i=0; i<=steps; i++) {
+                    const t = i/steps;
+                    const sag = sagAmount * Math.sin(t * Math.PI); 
+                    const x = THREE.MathUtils.lerp(p1.x, p2.x, t);
+                    const y = THREE.MathUtils.lerp(p1.y, p2.y, t) - sag; 
+                    const z = THREE.MathUtils.lerp(p1.z, p2.z, t);
+                    
+                    pos.push(x, y, z);
+                    col.push(c.r, c.g, c.b);
+                    sizes.push(sz);
+                    santaData.particles.push({ baseX: x, baseY: y, baseZ: z, type: 'solid', noiseOffset: 0 });
+                }
+            };
+
+            const handL = new THREE.Vector3(-3, 33, 12); 
+            const handR = new THREE.Vector3(3, 33, 12);  
+
+            // 1. XE TRƯỢT
+            for(let z=-40; z<=40; z+=2) {
+                const yCurve = (z > 20) ? Math.pow((z-20)/20, 2) * 15 : 0;
+                addPoint(-25, yCurve, z, 0x8B4513, 6); addPoint( 25, yCurve, z, 0x8B4513, 6);
+                if(z % 20 === 0) { for(let x=-25; x<=25; x+=2) addPoint(x, yCurve + 2, z, 0xCD853F, 5); }
+            }
+            for(let x=-22; x<=22; x+=3) {
+                for(let z=-30; z<=30; z+=3) {
+                    addPoint(x, 10, z, 0x8B0000, 7);
+                    if(x<-18 || x>18 || z<-25) { const wallHeight = (z < -10) ? 25 : 15; for(let y=10; y<=10+wallHeight; y+=3) addPoint(x, y, z, 0xFFD700, 6); }
+                }
+            }
+            // 2. ÔNG GIÀ NOEL
+            const santaBasePath = {x:0, y:18, z:0};
+            for(let i=0; i<400; i++) { const r = 12 + Math.random()*3; const theta = Math.random()*Math.PI*2; const phi = Math.random()*Math.PI; addPoint(santaBasePath.x + r*Math.sin(phi)*Math.cos(theta), santaBasePath.y + 10 + r*Math.cos(phi)*0.8, santaBasePath.z + r*Math.sin(phi)*Math.sin(theta)*0.8, 0xFF0000, 9); }
+            for(let i=0; i<150; i++) { const r = 6 + Math.random()*2; const theta = Math.random()*Math.PI*2; const phi = Math.random()*Math.PI; addPoint(santaBasePath.x + r*Math.sin(phi)*Math.cos(theta), santaBasePath.y + 30 + r*Math.cos(phi), santaBasePath.z + r*Math.sin(phi)*Math.sin(theta), 0xFFE4C4, 7); }
+            for(let i=0; i<250; i++) { addPoint(santaBasePath.x + (Math.random()-0.5)*12, santaBasePath.y + 25 + (Math.random()-0.5)*8, santaBasePath.z + 5 + Math.random()*5, 0xFFFFFF, 8); }
+            for(let i=0; i<150; i++) { const r = 7 * (1 - i/150); const y = santaBasePath.y + 36 + i/150 * 15; const theta = Math.random()*Math.PI*2; if(i<40) addPoint(santaBasePath.x + 8*Math.cos(theta), y, santaBasePath.z + 8*Math.sin(theta), 0xFFFFFF, 8); else addPoint(santaBasePath.x + r*Math.cos(theta), y, santaBasePath.z + r*Math.sin(theta), 0xFF0000, 7); }
+
+            // 3. TUẦN LỘC
+            const teamInfo = []; 
+
+            for(let pair=0; pair<4; pair++) {
+                const forwardZ = 80 + pair * 60;
+                
+                const info = {
+                    leftMouth: new THREE.Vector3(-25 + 2, 37, forwardZ + 28),
+                    rightMouth: new THREE.Vector3(25 - 2, 37, forwardZ + 28),
+                    leftHarness: new THREE.Vector3(-25 + 4, 20, forwardZ + 15),
+                    rightHarness: new THREE.Vector3(25 - 4, 20, forwardZ + 15)
+                };
+                teamInfo.push(info);
+
+                for(let side=-1; side<=1; side+=2) {
+                    const rX = side * 25; const rY = 15;
+                    for(let i=0; i<120; i++) { addPoint(rX + (Math.random()-0.5)*10, rY + (Math.random()-0.5)*8, forwardZ + (Math.random()-0.5)*25, 0xA0522D, 7); }
+                    for(let i=0; i<80; i++) { const t = i/80; addPoint(rX, rY + 5 + t*15, forwardZ + 15 + t*10 + (Math.random()-0.5)*4, 0xA0522D, 6); }
+                    const headZ = forwardZ + 28; const headY = rY + 22; const noseColor = (pair === 3) ? 0xFF0000 : 0x8B4513;
+                    addPoint(rX, headY, headZ+2, noseColor, 8);
+                    
+                    const antlerColor = 0xD2B48C;
+                    for(let aSide=-1; aSide<=1; aSide+=2) {
+                        for(let h=0; h<15; h++) { addPoint(rX + aSide*(2+h*0.5), headY + 8 + h, headZ - h*0.3, antlerColor, 4); if(h===8 || h===12) { addPoint(rX + aSide*(4+h*0.5), headY + 8 + h + 2, headZ - h*0.3, antlerColor, 3); } }
+                    }
+                    for(let lZ of [-10, 10]) { for(let lY=rY-5; lY >= rY-25; lY-=3) { addPoint(rX-4, lY, forwardZ+lZ, 0xA0522D, 5); addPoint(rX+4, lY, forwardZ+lZ, 0xA0522D, 5); } }
+                }
+            }
+
+            for(let i=0; i<4; i++) {
+                const current = teamInfo[i];
+                let targetLeft, targetRight;
+                let sag = 2.0;
+
+                if (i === 0) {
+                    targetLeft = handL;
+                    targetRight = handR;
+                    sag = 4.0; 
+                } else {
+                    targetLeft = teamInfo[i-1].leftHarness;
+                    targetRight = teamInfo[i-1].rightHarness;
+                }
+
+                addLine(targetLeft, current.leftMouth, 0xFFD700, 2, sag);
+                addLine(targetRight, current.rightMouth, 0xFFD700, 2, sag);
+            }
+
+            const geo = new THREE.BufferGeometry();
+            geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+            geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+            geo.setAttribute('aSize', new THREE.Float32BufferAttribute(sizes, 1));
+            geo.getAttribute('position').setUsage(THREE.DynamicDrawUsage);
+            
+            const mat = new THREE.PointsMaterial({ size: 10, map: fuzzyTex, vertexColors: true, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0.95 });
+            santaPoints = new THREE.Points(geo, mat);
+            santaPoints.frustumCulled = false; 
+            santaGroup.add(santaPoints);
+            santaGroup.visible = false;
+            santaGroup.renderOrder = 2; 
+            scene.add(santaGroup);
+        };
+
+        // TẠO CHỮ LẶP LẠI LIÊN TỤC TRÊN ĐƯỜNG BAY
+        const letterTrailGroup = new THREE.Group();
+        letterTrailGroup.renderOrder = 2; 
+        scene.add(letterTrailGroup);
+        
+        const charTextures = {};
+        const getCharTexture = (char) => {
+            if (charTextures[char]) return charTextures[char];
+            const canvas = document.createElement('canvas');
+            canvas.width = 128; canvas.height = 128;
+            const ctx = canvas.getContext('2d');
+            ctx.font = 'bold 80px "Dancing Script", cursive'; 
+            ctx.fillStyle = '#FFD700'; 
+            ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.shadowColor = '#FFA500'; ctx.shadowBlur = 5;
+            ctx.fillText(char, 64, 64);
+            const tex = new THREE.Texture(canvas);
+            tex.needsUpdate = true;
+            charTextures[char] = tex;
+            return tex;
+        };
+
+        const createLetterParticleSystem = (position) => {
+            const particleCount = 25; 
+            const posArray = new Float32Array(particleCount * 3);
+            const velocities = [];
+            
+            for(let i = 0; i < particleCount; i++) {
+                posArray[i*3] = position.x + (Math.random() - 0.5) * 10;
+                posArray[i*3+1] = position.y + (Math.random() - 0.5) * 10;
+                posArray[i*3+2] = position.z + (Math.random() - 0.5) * 10;
+                
+                velocities.push(new THREE.Vector3(
+                    (Math.random() - 0.5) * 1.5, 
+                    Math.random() * 1.5 + 0.5,   
+                    (Math.random() - 0.5) * 1.5  
+                ));
+            }
+            
+            const geo = new THREE.BufferGeometry();
+            geo.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+            
+            const mat = new THREE.PointsMaterial({
+                size: 8,
+                map: fuzzyTex,
+                color: 0xFFD700, 
+                transparent: true,
+                opacity: 1.0,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+                depthTest: true 
+            });
+            
+            const particles = new THREE.Points(geo, mat);
+            particles.frustumCulled = false; 
+            particles.renderOrder = 2;
+            return { particles, velocities };
+        };
+
+
+        const baseString = "MERRY CHRISTMAS "; 
+        const repeatCount = 12; 
+        const fullString = baseString.repeat(repeatCount);
+        const letterObjects = []; 
+
+        const getSantaPositionAtT = (t) => {
+            const y = 350 - 500 * t + 50 * Math.sin(t * Math.PI * 4); 
+            const normalizedT = (t - 0.5) * 2; 
+            const radius = 420 + 3000 * Math.pow(Math.abs(normalizedT), 4);
+            const angle = t * Math.PI * 5; 
+            const x = radius * Math.cos(angle);
+            const z = radius * Math.sin(angle);
+            return new THREE.Vector3(x, y, z);
+        };
+
+        let accumulatedT = 0.02; 
+        const letterStepT = 0.005; 
+        const spaceStepT = 0.012;  
+
+        for (let i = 0; i < fullString.length; i++) {
+            const char = fullString[i];
+            
+            if (char === ' ') {
+                accumulatedT += spaceStepT;
+                continue;
+            }
+
+            const tex = getCharTexture(char);
+            const mat = new THREE.SpriteMaterial({ 
+                map: tex, transparent: true, opacity: 0, 
+                color: 0xffffff, blending: THREE.AdditiveBlending, depthWrite: false,
+                depthTest: true
+            });
+            const sprite = new THREE.Sprite(mat);
+            sprite.scale.set(35, 35, 1); 
+            sprite.renderOrder = 2;
+            letterTrailGroup.add(sprite);
+            
+            const fixedPos = getSantaPositionAtT(accumulatedT);
+            fixedPos.y -= 10; 
+            sprite.position.copy(fixedPos);
+
+            letterObjects.push({
+                sprite: sprite,
+                triggerT: accumulatedT,
+                active: false,
+                appearTime: 0,    
+                isFading: false,  
+                particleSystem: null, 
+                particleVelocities: [] 
+            });
+
+            accumulatedT += letterStepT;
+        }
+
+
+        const createFillerPoints = () => { 
+            const count = 4000; const pos=[], col=[]; const c=new THREE.Color(); const hFull = 370; 
+            for(let i=0; i<count; i++) { 
+                const yPos = Math.random() * hFull; const maxR = ((hFull - yPos) / hFull) * 180; const r = Math.pow(Math.random(), 0.7) * maxR; const theta = Math.random() * Math.PI * 2; 
+                pos.push(r * Math.cos(theta), yPos, r * Math.sin(theta)); 
+                c.setHSL(0.33, 1.0, 0.15 + Math.random()*0.1); 
+                col.push(c.r,c.g,c.b); 
+                fillerData.push({ home: new THREE.Vector3(pos[i*3],pos[i*3+1],pos[i*3+2]), explodeDir: new THREE.Vector3(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5).normalize(), speed: 0.3 + Math.random()*0.5, current: new THREE.Vector3(pos[i*3],pos[i*3+1],pos[i*3+2]) }); 
+            } 
+            const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.Float32BufferAttribute(pos,3)); geo.setAttribute('color', new THREE.Float32BufferAttribute(col,3)); 
+            try { geo.getAttribute('position').setUsage(THREE.DynamicDrawUsage); geo.getAttribute('color').setUsage(THREE.DynamicDrawUsage); } catch(e){}
+            return new THREE.Points(geo, new THREE.PointsMaterial({ size: 28.0, map: superSoftTex, vertexColors: true, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0.32 })); 
+        };
+
+        const createPoints = (count, size, isRibbon) => { 
+            const pos=[], col=[]; const c=new THREE.Color(); 
+            for(let i=0; i<count; i++) { 
+                let x, y, z; let t = i/count; let blinkOffset = 0; let origColor = new THREE.Color(); let originalHSL = { h: 0, s: 0, l: 0 }; 
+                if(isRibbon) { 
+                    const cy = THREE.MathUtils.lerp(370, 20, t); const r = Math.pow((380-cy)/380, 0.75)*200; const a = t*12*Math.PI*2; 
+                    x = Math.cos(a)*r + (Math.random()-0.5)*10; y = cy + Math.sin(t*20)*15; z = Math.sin(a)*r + (Math.random()-0.5)*10; 
+                    blinkOffset = Math.random() * 100; 
+                    const hue = Math.random(); 
+                    if (hue < 0.25) c.setHSL(0.0, 1.0, 0.5); 
+                    else if (hue < 0.5) c.setHSL(0.15, 1.0, 0.5); 
+                    else if (hue < 0.75) c.setHSL(0.33, 1.0, 0.5); 
+                    else c.setHSL(0.66, 1.0, 0.5); 
+                } else { 
+                    const hFull = 380; const yPos = Math.random() * 360; const coneR = ((hFull - yPos) / hFull) * 200; 
+                    const r = Math.sqrt(Math.random()) * coneR; const theta = Math.random() * Math.PI * 2; 
+                    x = r * Math.cos(theta); y = yPos; z = r * Math.sin(theta); 
+                    const pick = Math.random();
+                    if (pick < 0.85) {
+                        if (Math.random() < 0.6) c.setHSL(0.33 + (Math.random()-0.5)*0.03, 0.9 + Math.random()*0.1, 0.20 + (Math.random()-0.5)*0.08);
+                        else c.setHSL(0.33 + (Math.random()-0.5)*0.02, 0.95 + Math.random()*0.05, 0.15 + (Math.random()-0.5)*0.05);
+                    } else {
+                        const choice = Math.random();
+                        if (choice < 0.20) c.setHSL(0.0 + (Math.random()-0.5)*0.02, 0.9 + Math.random()*0.1, 0.45 + Math.random()*0.1);
+                        else if (choice < 0.40) c.setHSL(0.12 + (Math.random()-0.5)*0.03, 0.9 + Math.random()*0.1, 0.45 + Math.random()*0.12);
+                        else if (choice < 0.60) c.setHSL(0.66 + (Math.random()-0.5)*0.02, 0.7 + Math.random()*0.2, 0.40 + Math.random()*0.12);
+                        else if (choice < 0.80) c.setHSL(0.85 + (Math.random()-0.5)*0.02, 0.7 + Math.random()*0.2, 0.40 + Math.random()*0.12);
+                        else c.setHSL(0.0, 0.0, 0.95 + Math.random()*0.05);
+                    }
+                } 
+                c.getHSL(originalHSL); origColor.copy(c); pos.push(x, y, z); col.push(c.r,c.g,c.b);
+                const baseSize = (typeof size === 'number') ? size : (isRibbon ? 12.0 : 7.0);
+                const data = { home: new THREE.Vector3(x,y,z), explodeDir: new THREE.Vector3(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5).normalize(), driftPhase: Math.random() * Math.PI * 2, speed: 0.5 + Math.random()*1.5, current: new THREE.Vector3(x,y,z), t: t, blinkOffset: blinkOffset, origColor: origColor, hsl: originalHSL, baseSize: baseSize };
+                if(isRibbon) ribbonData.push(data); else foliageData.push(data);
+            } 
+            const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.Float32BufferAttribute(pos,3)); geo.setAttribute('color', new THREE.Float32BufferAttribute(col,3)); 
+            try {
+                const countVerts = pos.length / 3;
+                const sizes = new Float32Array(countVerts);
+                for (let si = 0; si < countVerts; si++) sizes[si] = (typeof size === 'number') ? size : (isRibbon ? 12.0 : 7.0);
+                geo.setAttribute('aSize', new THREE.Float32BufferAttribute(sizes, 1));
+                geo.getAttribute('aSize').setUsage(THREE.DynamicDrawUsage);
+            } catch(e) {}
+            try { geo.getAttribute('position').setUsage(THREE.DynamicDrawUsage); geo.getAttribute('color').setUsage(THREE.DynamicDrawUsage); } catch(e){}
+            const pointSize = (typeof size === 'number') ? size : (isRibbon ? 12.0 : 7.0);
+            
+            const mParams = { 
+                size: pointSize, map: fuzzyTex, vertexColors: true, 
+                blending: isRibbon ? THREE.AdditiveBlending : THREE.NormalBlending, 
+                depthWrite: isRibbon ? false : true, 
+                transparent: true, 
+                opacity: isRibbon ? 1.0 : 0.95,
+                alphaTest: 0.5 
+            };
+
+            return new THREE.Points(geo, new THREE.PointsMaterial(mParams)); 
+        };
+
+        const createSharpStarParticles = () => { 
+            const spikes = 5; const perSpike = 120; const coreCount = 220; const centerY = 380; const R = 55; const depth = 8;
+            const spikePos = [], spikeCol = [];
+            const base = new THREE.Color(0xFFD700);
+            for (let s = 0; s < spikes; s++) {
+                const ang = (s / spikes) * Math.PI * 2;
+                for (let j = 0; j < perSpike; j++) {
+                    const t = j / perSpike; const dist = 4.0 + t * R + (Math.random() - 0.5) * 0.6; const x = Math.cos(ang) * dist + (Math.random() - 0.5) * 0.4; const z = Math.sin(ang) * dist + (Math.random() - 0.5) * 0.4; const y_world = centerY + (Math.random() - 0.5) * 2.0; 
+                    const y = y_world - centerY;
+                    spikePos.push(x, y, z);
+                    const lerp = 0.6 + 0.4 * t; const r = THREE.MathUtils.lerp(1.0, base.r, lerp); const g = THREE.MathUtils.lerp(1.0, base.g, lerp); const b = THREE.MathUtils.lerp(1.0, base.b, lerp); spikeCol.push(r, g, b);
+                    const ed = new THREE.Vector3(x, y, z).normalize(); starData.push({ home: new THREE.Vector3(x, y, z), explodeDir: ed, driftPhase: Math.random() * Math.PI * 2, speed: 1.0 + Math.random() * 2.0, current: new THREE.Vector3(x, y, z) });
+                }
+            }
+            const radialCount = 120; const radialSegments = 12; const radialLength = 70; const golden = Math.PI * (3 - Math.sqrt(5));
+            for (let i = 0; i < radialCount; i++) {
+                const yNorm = 1 - (i / (radialCount - 1)) * 2; const radius = Math.sqrt(Math.max(0, 1 - yNorm * yNorm)); const theta = (i * golden) % (Math.PI * 2); const dirX = Math.cos(theta) * radius; const dirZ = Math.sin(theta) * radius; const dirY = yNorm;
+                for (let s = 0; s < radialSegments; s++) {
+                    const t = s / (radialSegments - 1); 
+                    const dist = 4.0 + t * radialLength + (Math.random() - 0.5) * 0.6; 
+                    const x = dirX * dist + (Math.random() - 0.5) * 0.2; 
+                    const y = dirY * dist + (Math.random() - 0.5) * 0.2; 
+                    const z = dirZ * dist + (Math.random() - 0.5) * 0.2;
+                    spikePos.push(x, y, z); 
+                    const fade = 1.0 - Math.pow(t, 1.2) * 0.85; 
+                    spikeCol.push(THREE.MathUtils.lerp(1.0, base.r, 1.0 - fade * 0.6), THREE.MathUtils.lerp(1.0, base.g, 1.0 - fade * 0.7), THREE.MathUtils.lerp(1.0, base.b, 1.0 - fade * 0.9));
+                    const ed = new THREE.Vector3(x, y, z).normalize(); 
+                    starData.push({ home: new THREE.Vector3(x, y, z), explodeDir: ed, driftPhase: Math.random() * Math.PI * 2, speed: 1.0 + Math.random() * 2.0, current: new THREE.Vector3(x, y, z) });
+                }
+            }
+            const extraArms = 18; const extraPer = 48; const extraPos = [], extraCol = [];
+            for (let a = 0; a < extraArms; a++) {
+                const theta = Math.random() * Math.PI * 2; const cosphi = 2 * Math.random() - 1; const phi = Math.acos(Math.max(-1, Math.min(1, cosphi))); const dir = new THREE.Vector3(Math.sin(phi) * Math.cos(theta), Math.cos(phi), Math.sin(phi) * Math.sin(theta));
+                for (let j = 0; j < extraPer; j++) {
+                    const t = j / extraPer; const dist = 6.0 + t * (radialLength * 0.7) + (Math.random() - 0.5) * 0.8; const x = dir.x * dist + (Math.random() - 0.5) * 0.25; const y = dir.y * dist + (Math.random() - 0.5) * 0.25; const z = dir.z * dist + (Math.random() - 0.5) * 0.25;
+                    extraPos.push(x, y, z); const fade = 1.0 - Math.pow(t, 1.1) * 0.85; extraCol.push(THREE.MathUtils.lerp(1.0, base.r, 1.0 - fade * 0.35), THREE.MathUtils.lerp(1.0, base.g, 1.0 - fade * 0.35), THREE.MathUtils.lerp(1.0, base.b, 1.0 - fade * 0.38));
+                    const ed = new THREE.Vector3(x, y, z).normalize(); starData.push({ home: new THREE.Vector3(x, y, z), explodeDir: ed, driftPhase: Math.random() * Math.PI * 2, speed: 1.0 + Math.random() * 2.0, current: new THREE.Vector3(x, y, z) });
+                }
+            }
+            if (extraPos.length > 0) { for (let k = 0; k < extraPos.length; k++) spikePos.push(extraPos[k]); for (let k = 0; k < extraCol.length; k++) spikeCol.push(extraCol[k]); }
+            const corePos = [], coreCol = [];
+            for (let i = 0; i < coreCount; i++) {
+                const r = Math.random() * 6.0; const a = Math.random() * Math.PI * 2; const x = Math.cos(a) * r * (0.3 + Math.random() * 0.7); const z = Math.sin(a) * r * (0.3 + Math.random() * 0.7); const y_world = centerY + (Math.random() - 0.5) * 1.2; const y = y_world - centerY;
+                corePos.push(x, y, z); const ic = 0.7 + Math.random() * 0.25; coreCol.push(base.r * ic * 0.95, base.g * ic * 0.95, base.b * (0.7 + Math.random() * 0.25));
+                const ed = new THREE.Vector3(x, y, z).normalize(); starData.push({ home: new THREE.Vector3(x, y, z), explodeDir: ed, driftPhase: Math.random() * Math.PI * 2, speed: 1.0 + Math.random() * 2.0, current: new THREE.Vector3(x, y, z) });
+            }
+            const spikeGeo = new THREE.BufferGeometry(); spikeGeo.setAttribute('position', new THREE.Float32BufferAttribute(spikePos, 3)); spikeGeo.setAttribute('color', new THREE.Float32BufferAttribute(spikeCol, 3));
+            const spikeMat = new THREE.PointsMaterial({ size: 3.5, map: fuzzyTex, color: 0xFFD070, vertexColors: false, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0.85 });
+            const spikesPoints = new THREE.Points(spikeGeo, spikeMat);
+            const coreGeo = new THREE.BufferGeometry(); coreGeo.setAttribute('position', new THREE.Float32BufferAttribute(corePos, 3)); coreGeo.setAttribute('color', new THREE.Float32BufferAttribute(coreCol, 3));
+            const coreMat = new THREE.PointsMaterial({ size: 5.0, map: superSoftTex, color: 0xE6C25A, vertexColors: false, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0.45 });
+            const corePoints = new THREE.Points(coreGeo, coreMat);
+            starCore = corePoints;
+            return spikesPoints;
+        };
+
+        const fillerMesh = createFillerPoints(); treeGroup.add(fillerMesh);
+        const FOLIAGE_COUNT = 15000; 
+        const FOLIAGE_SIZE = 18.0;    
+        foliageGeometry = createPoints(FOLIAGE_COUNT, FOLIAGE_SIZE, false).geometry;
+        foliagePoints = new THREE.Points(foliageGeometry, new THREE.PointsMaterial({ 
+            size:FOLIAGE_SIZE, map:crispDotTex, sizeAttenuation:true, vertexColors:true, 
+            blending:THREE.NormalBlending, depthWrite: true,
+            transparent:true, opacity:1.0, alphaTest:0.5 
+        }));
+        treeGroup.add(foliagePoints);
+        ribbonGeometry = createPoints(3000, 15.0, true).geometry;
+        ribbonPoints = new THREE.Points(ribbonGeometry, new THREE.PointsMaterial({ size:15.0, map:crispDotTex, sizeAttenuation:true, vertexColors:true, blending:THREE.AdditiveBlending, depthWrite: false, transparent:true, opacity:0.95, alphaTest:0.02 }));
+        treeGroup.add(ribbonPoints);
+        const starMesh = createSharpStarParticles();
+        const STAR_Y = 395; const STAR_OFFSET = new THREE.Vector3(0, 0, 0);
+        starGroup = new THREE.Group();
+        starGroup.position.set(STAR_OFFSET.x, STAR_Y + STAR_OFFSET.y, STAR_OFFSET.z);
+        starMesh.rotation.x = -Math.PI / 2; starMesh.position.set(0, 0, 0); starGroup.add(starMesh);
+        const starGlow = new THREE.Points(starMesh.geometry, new THREE.PointsMaterial({ size: 10.0, map: fuzzyTex, color: 0xFFE38A, vertexColors: false, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0.18 }));
+        starGlow.rotation.x = -Math.PI / 2; starGlow.position.set(0, 0, 0); starGroup.add(starGlow);
+        if (starCore) { starCore.rotation.x = -Math.PI / 2; starCore.position.set(0, 0, 0); if (starCore.material) { starCore.material.opacity = 0.0; starCore.material.transparent = true; } starCore.visible = false; starGroup.add(starCore); }
+        pulseGlow = new THREE.Points(starCore.geometry, new THREE.PointsMaterial({ size: 48.0, map: superSoftTex, vertexColors: false, color: 0xFFDDA0, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0.18 }));
+        pulseGlow.position.set(0, 0, 0); starGroup.add(pulseGlow); if (pulseGlow && pulseGlow.material) { pulseGlow.material.opacity = 0.0; pulseGlow.visible = false; }
+        starSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: superSoftTex, color: 0xFFDFA0, blending: THREE.AdditiveBlending, opacity: 0.12, depthWrite: false, transparent: true }));
+        starSprite.scale.set(160, 160, 1); starSprite.position.set(0, 0, 0); starGroup.add(starSprite); if (starSprite && starSprite.material) { starSprite.material.opacity = 0.0; starSprite.visible = false; }
+        const halo = new THREE.Mesh(new THREE.PlaneGeometry(250,250), new THREE.MeshBasicMaterial({ map: fuzzyTex, color: 0xFFD700, transparent:true, blending:THREE.AdditiveBlending, opacity: 0.12, side: THREE.DoubleSide, depthWrite: false }));
+        halo.position.set(0, 10, 0); starGroup.add(halo);
+        treeGroup.add(starGroup);
+
+        createDetailedSantaTeam();
+        
+        createSnow();
+        initSantaSmoke();
+
+        // HỘP QUÀ
+        const giftBoxes=[];
+        const createBoxP=(w,h,d,cH)=>{ 
+            const pointsPerFace = 400; const pos=[],col=[]; const c=new THREE.Color(cH); 
+            for(let i=0;i<pointsPerFace;i++){ const f=Math.floor(Math.random()*6); let x,y,z; const noise = 0.2; if(f===0){x=(Math.random()-.5)*w;y=(Math.random()-.5)*h;z=d/2+(Math.random()-.5)*noise;} else if(f===1){x=(Math.random()-.5)*w;y=(Math.random()-.5)*h;z=-d/2+(Math.random()-.5)*noise;} else if(f===2){x=w/2+(Math.random()-.5)*noise;y=(Math.random()-.5)*h;z=(Math.random()-.5)*d;} else if(f===3){x=-w/2+(Math.random()-.5)*noise;y=(Math.random()-.5)*h;z=(Math.random()-.5)*d;} else if(f===4){x=(Math.random()-.5)*w;y=h/2+(Math.random()-.5)*noise;z=(Math.random()-.5)*d;} else {x=(Math.random()-.5)*w;y=-h/2+(Math.random()-.5)*noise;z=(Math.random()-.5)*d;} pos.push(x,y,z); c.setHex(cH); c.multiplyScalar(2.0 + Math.random()); col.push(c.r,c.g,c.b); } 
+            const geo=new THREE.BufferGeometry(); geo.setAttribute('position',new THREE.Float32BufferAttribute(pos,3)); geo.setAttribute('color',new THREE.Float32BufferAttribute(col,3)); 
+            return new THREE.Points(geo, new THREE.PointsMaterial({ size: 4.0, map: sharpBoxTex, vertexColors:true, blending:THREE.AdditiveBlending, transparent:true, depthWrite: false, opacity: 1.0 })); 
+        };
+        
+        IMAGE_URLS.forEach((url,i)=>{
+            const statusContainer = document.getElementById('img-status');
+            const item = document.createElement('div'); item.style.textAlign = 'center'; item.style.width = '80px';
+            const thumb = document.createElement('img'); thumb.style.width = '72px'; thumb.style.height = '72px'; thumb.style.objectFit = 'cover'; thumb.style.border = '2px solid rgba(255,255,255,0.06)'; thumb.style.borderRadius = '6px';
+            const label = document.createElement('div'); label.style.fontSize='11px'; label.style.color='#aaa'; label.innerText = `#${i+1}`;
+            item.appendChild(thumb); item.appendChild(label); statusContainer.appendChild(item);
+            const probe = new Image(); probe.crossOrigin = 'anonymous';
+            probe.onload = () => { thumb.src = url; label.innerText = `#${i+1} OK`; };
+            probe.onerror = () => { label.innerText = `#${i+1} LỖI`; thumb.style.filter = 'grayscale(1)'; };
+            probe.src = url;
+
+            const grp=new THREE.Group(); const body=createBoxP(30,30,30,BOX_COLORS[i]); grp.add(body);
+            const lid=createBoxP(34,6,34,BOX_COLORS[i]); lid.position.set(0,3,15); const lidG=new THREE.Group(); lidG.position.set(0,15,-15); lidG.add(lid); grp.add(lidG);
+            const con=new THREE.Group(); const a=(i/5)*Math.PI*2; const ny=380 - (i * 60 + 80); const t=(380-ny)/380; const r=Math.pow(t,0.75)*180*0.95; 
+            con.position.set(Math.cos(a)*r,ny,Math.sin(a)*r); con.add(grp); 
+            
+            con.userData={ basePos:con.position.clone(), angleIndex: i, lid:lidG, texture: null }; 
+            texLoader.load(url, (loadedTexture) => {
+                try { if (THREE.sRGBEncoding) loadedTexture.encoding = THREE.sRGBEncoding; } catch(e){}
+                loadedTexture.needsUpdate = true; con.userData.texture = loadedTexture;
+            }, undefined, () => {
+                const fb = createFallbackTexture(i, BOX_COLORS[i]); con.userData.texture = fb;
+            });
+            treeGroup.add(con); giftBoxes.push(con);
+        });
+
+        // 3. STATE
+        let STATE = { rotVelocity: 0.002, targetZoomZ: 800, currentZoomZ: 800, isExploded: false, explodeLevel: 0, explodeTimestamp: 0, activeBoxIndex: -1, canRotate: true, targetTreeY: CONFIG.treeBaseY, runLightPos: 0.0, isTextMode: false };
+        const smoothX = {val:0, update:function(t){this.val+=(t-this.val)*0.15;return this.val;}};
+        const statusBadge = document.getElementById('status-hand');
+
+        // 4. HANDS
+        async function initHands() {
+            try {
+                if (typeof Hands === 'undefined') throw new Error("Chưa load được Hands.js");
+                const hands = new Hands({locateFile: (file) => `js/${file}`});
+                hands.setOptions({maxNumHands:2, modelComplexity:1, minDetectionConfidence:0.5, minTrackingConfidence:0.5});
+                hands.onResults(onResults);
+                const vid = document.getElementById('video-element');
+                const stream = await navigator.mediaDevices.getUserMedia({video:{width:640,height:480}});
+                vid.srcObject = stream; vid.play();
+                const loop=async()=>{if(vid.readyState>=2)await hands.send({image:vid}); requestAnimationFrame(loop);}; loop();
+            } catch(e) { 
+                console.warn(e);
+                statusBadge.innerText = "CHẠY TỰ ĐỘNG (LỖI)"; statusBadge.style.borderColor = "#FFFF00"; statusBadge.style.color = "#FFFF00";
+                STATE.rotVelocity = 0.005; document.getElementById('loader').style.display='none';
+            }
+        }
+
+        function countFingers(lm) {
+            let c=0; const w=lm[0]; const t=[8,12,16,20]; const p=[6,10,14,18];
+            t.forEach((ti,i)=>{if(Math.hypot(lm[ti].x-w.x,lm[ti].y-w.y)>Math.hypot(lm[p[i]].x-w.x,lm[p[i]].y-w.y))c++;});
+            if(Math.hypot(lm[4].x-lm[17].x,lm[4].y-lm[17].y)>0.12) c++;
+            if(c === 0) { const dIndex = Math.hypot(lm[8].x - w.x, lm[8].y - w.y); if(dIndex > 0.18) c = 1; }
+            return c;
+        }
+
+        function onResults(res) {
+            document.getElementById('loader').style.display='none';
+            let totalFingers = 0;
+            if(res.multiHandLandmarks.length > 0) {
+                let cnt = 0;
+                let lm = res.multiHandLandmarks[0];
+                if (res.multiHandLandmarks.length === 1) { 
+                    lm = res.multiHandLandmarks[0]; cnt = countFingers(lm); totalFingers = cnt;
+                } else { 
+                    for (let hi = 0; hi < res.multiHandLandmarks.length; hi++) {
+                        const f = countFingers(res.multiHandLandmarks[hi]);
+                        cnt += f;
+                        totalFingers += f;
+                    }
+                }
+                
+                const elapsed = Date.now() - STATE.explodeTimestamp;
+
+                // LOGIC CHUYỂN ĐỔI CHẾ ĐỘ CHỮ (PARTICLE MORPHING)
+                if (STATE.isExploded && elapsed > 5000 && totalFingers >= 7) {
+                    STATE.isTextMode = true;
+                    statusBadge.innerText = "❤️ I LOVE YOU ❤️"; statusBadge.style.color = "#FF69B4"; statusBadge.style.borderColor = "#FF69B4";
+                } else if (STATE.isTextMode && totalFingers < 5) {
+                    STATE.isTextMode = false;
+                }
+
+                if (!STATE.isTextMode) {
+                    const sx = smoothX.update((1 - lm[9].x) * 2 - 1);
+                    if (cnt <= 1) {
+                        statusBadge.innerText = "✊ RESET"; statusBadge.style.color = "#fff"; statusBadge.style.borderColor = "#fff";
+                        STATE.isExploded = false; STATE.activeBoxIndex = -1; STATE.canRotate = true; overlayPlane.userData.currentBoxIndex = -1; STATE.targetTreeY = CONFIG.treeBaseY;
+                    } else {
+                        if (!STATE.isExploded) {
+                            if (cnt === 2) {
+                                STATE.targetZoomZ -= 15; 
+                                statusBadge.innerText = "🔍 PHÓNG TO (2)"; statusBadge.style.color = "#00FF00"; statusBadge.style.borderColor = "#00FF00";
+                            } else if (cnt === 3) {
+                                STATE.targetZoomZ += 15; 
+                                statusBadge.innerText = "🔍 THU NHỎ (3)"; statusBadge.style.color = "#00FF00"; statusBadge.style.borderColor = "#00FF00";
+                            } else if (cnt === 4) { 
+                                STATE.targetTreeY = CONFIG.treeHighY; statusBadge.innerText = "🖐 ĐẨY LÊN"; statusBadge.style.color = "#00FFFF"; statusBadge.style.borderColor = "#00FFFF"; 
+                            } else if (cnt === 5) { 
+                                STATE.isExploded = true; STATE.canRotate = false; STATE.explodeTimestamp = Date.now(); statusBadge.innerText = "🖐 BUNG LỤA"; statusBadge.style.color = "#FF00FF"; statusBadge.style.borderColor = "#FF00FF"; 
+                            }
+                        } else {
+                            if (elapsed < 5000) { statusBadge.innerText = `⏳ ĐANG BUNG...`; statusBadge.style.color = "#00FFFF"; statusBadge.style.borderColor = "#00FFFF"; STATE.activeBoxIndex = -1; } else {
+                                if (cnt === 6) { STATE.activeBoxIndex = 0; statusBadge.innerText = `🎁 MỞ HỘP 1`; statusBadge.style.color = BOX_COLORS[0].toString(16); statusBadge.style.borderColor = "#FFD700"; } else if (cnt >= 1 && cnt <= 5) { STATE.activeBoxIndex = cnt - 1; statusBadge.innerText = `🎁 XEM QUÀ ${cnt}`; statusBadge.style.color = BOX_COLORS[cnt-1].toString(16); statusBadge.style.borderColor = "#FFD700"; } else { STATE.activeBoxIndex = -1; statusBadge.innerText = `🖐 GIƠ 1-5 NGÓN`; statusBadge.style.color = "#aaa"; statusBadge.style.borderColor = "#aaa"; }
+                            }
+                        }
+                    }
+                    if(STATE.canRotate && Math.abs(sx)>0.2) STATE.rotVelocity=sx*CONFIG.rotationSpeed; else STATE.rotVelocity*=0.8; STATE.targetZoomZ = Math.max(200, Math.min(1200, STATE.targetZoomZ));
+                }
+            } else { STATE.rotVelocity*=0.8; statusBadge.innerText = "TÌM TAY..."; statusBadge.style.color = "#444"; statusBadge.style.borderColor = "#444"; if(STATE.isExploded && !STATE.isTextMode) STATE.activeBoxIndex = -1; }
+        }
+        initHands();
+
+        const invM=new THREE.Matrix4(), tW=new THREE.Vector3(), tL=new THREE.Vector3(), look=new THREE.Vector3(), boxW=new THREE.Vector3(); const tempColor = new THREE.Color();
+        let __frameCounter = 0;
+
+        setTimeout(() => { santaData.active = true; }, 2000);
+        window.addEventListener('keydown', (e) => { if (e.key === 's' || e.key === 'S') santaData.active = true; });
+
+        const easeInOutQuad = (t) => t<.5 ? 2*t*t : -1+(4-2*t)*t;
+
+        const getPathDataAtT = (t) => {
+            const y = 350 - 500 * t + 50 * Math.sin(t * Math.PI * 4);
+            const normalizedT = (t - 0.5) * 2;
+            const safeNormT = Math.abs(normalizedT) < 0.001 ? 0.001 * Math.sign(normalizedT) : normalizedT;
+            const radius = 420 + 3000 * Math.pow(Math.abs(safeNormT), 4);
+            const angle = t * Math.PI * 5;
+            const x = radius * Math.cos(angle);
+            const z = radius * Math.sin(angle);
+            const position = new THREE.Vector3(x, y, z);
+            const tNext = t + 0.0005;
+            const yNext = 350 - 500 * tNext + 50 * Math.sin(tNext * Math.PI * 4);
+            const normNext = (tNext - 0.5) * 2;
+            const safeNormNext = Math.abs(normNext) < 0.001 ? 0.001 * Math.sign(normNext) : normNext;
+            const rNext = 420 + 3000 * Math.pow(Math.abs(safeNormNext), 4);
+            const angNext = tNext * Math.PI * 5;
+            const xNext = rNext * Math.cos(angNext);
+            const zNext = rNext * Math.sin(angNext);
+            const lookTarget = new THREE.Vector3(xNext, yNext, zNext);
+            const tangent = lookTarget.clone().sub(position).normalize();
+            let upRef = new THREE.Vector3(0, 1, 0);
+            if (Math.abs(tangent.y) > 0.99) upRef.set(0, 0, 1);
+            const right = new THREE.Vector3().crossVectors(upRef, tangent).normalize();
+            const adjustedUp = new THREE.Vector3().crossVectors(tangent, right).normalize();
+            return { position, tangent, right, up: adjustedUp };
+        };
+
+        function animate(time) {
+            requestAnimationFrame(animate); TWEEN.update(); const now = Date.now() * 0.001; 
+            __frameCounter++;
+            const tExp=STATE.isExploded?1:0; STATE.explodeLevel+=(tExp-STATE.explodeLevel)*0.06;
+            
+            if (snowSystem && snowGeo) {
+                const positions = snowGeo.attributes.position.array;
+                const velocities = snowGeo.attributes.velocity.array;
+                for (let i = 0; i < positions.length / 3; i++) {
+                    positions[i * 3 + 1] += velocities[i * 3 + 1]; 
+                    positions[i * 3] += velocities[i * 3] + Math.sin(time * 0.001 + i)*0.1;
+                    positions[i * 3 + 2] += velocities[i * 3 + 2]; 
+                    if (positions[i * 3 + 1] < -300) {
+                        positions[i * 3 + 1] = 600;
+                        positions[i * 3] = (Math.random() - 0.5) * 1600;
+                        positions[i * 3 + 2] = (Math.random() - 0.5) * 1600;
+                    }
+                }
+                snowGeo.attributes.position.needsUpdate = true;
+            }
+
+            if (santaSmokePoints) {
+                const posAttr = santaSmokePoints.geometry.attributes.position;
+                const sizeAttr = santaSmokePoints.geometry.attributes.aSize;
+                const colAttr = santaSmokePoints.geometry.attributes.color;
+                const dt = 0.016; 
+                for(let i=0; i<SANTA_SMOKE_COUNT; i++) {
+                    const d = santaSmokeData[i];
+                    if(!d.active) continue;
+                    d.age += dt;
+                    if(d.age > 2.0) { d.active = false; posAttr.setY(i, -9999); continue; }
+                    const currentX = posAttr.getX(i);
+                    const currentY = posAttr.getY(i);
+                    const currentZ = posAttr.getZ(i);
+                    posAttr.setXYZ(i, currentX + d.velocity.x, currentY + d.velocity.y, currentZ + d.velocity.z);
+                    const lifeRatio = d.age / 2.0;
+                    const opacity = 1.0 - lifeRatio; 
+                    colAttr.setXYZ(i, opacity, opacity, opacity); 
+                    sizeAttr.setX(i, sizeAttr.getX(i) * 1.01); 
+                }
+                posAttr.needsUpdate = true;
+                sizeAttr.needsUpdate = true;
+                colAttr.needsUpdate = true;
+            }
+
+            if (!STATE.isExploded) {
+                if (typeof starGroup !== 'undefined' && starGroup) { starGroup.rotation.y += 0.02; } else { starMesh.rotation.y -= 0.02; }
+                if (starCore) starCore.rotation.y += 0.05;
+            } else {
+                if (typeof starGroup !== 'undefined' && starGroup) { starGroup.rotation.y *= 0.9; } else { starMesh.rotation.y *= 0.9; }
+                if (starCore) starCore.rotation.y *= 0.95;
+            }
+            if (starCore) { const pulse = 0.95 + 0.08 * Math.sin(now * 3.5); starCore.scale.set(pulse, pulse, pulse); }
+            if (pulseGlow && pulseGlow.material) { pulseGlow.material.opacity = 0.12 + 0.06 * (0.5 + 0.5 * Math.sin(now * 3.5 + 1.0)); }
+            if (starSprite && starSprite.material) { const s = 1.0 + 0.06 * Math.sin(now * 2.5); starSprite.scale.set(160 * s, 160 * s, 1); starSprite.material.opacity = 0.10 + 0.04 * Math.sin(now * 2.5 + 0.5); }
+            fillerMesh.material.opacity = THREE.MathUtils.lerp(1.0, 0.6, STATE.explodeLevel);
+
+            STATE.runLightPos += CONFIG.runLightSpeed; if(STATE.runLightPos > 1) STATE.runLightPos -= 1; 
+            if(!STATE.isTextMode) {
+                treeGroup.position.y += (STATE.targetTreeY - treeGroup.position.y) * 0.05; 
+                treeGroup.rotation.y+=STATE.rotVelocity; 
+                STATE.currentZoomZ+=(STATE.targetZoomZ-STATE.currentZoomZ)*0.08; 
+                camera.position.z=STATE.currentZoomZ; camera.lookAt(0,100,0);
+            } else {
+                // KHI HIỆN CHỮ: Khóa camera
+                treeGroup.rotation.y += (0 - treeGroup.rotation.y) * 0.05; 
+                camera.position.z += (800 - camera.position.z) * 0.05;
+                camera.lookAt(0,0,0);
+            }
+            
+            if (santaData.active && santaPoints) {
+                santaGroup.visible = true;
+                santaGroup.position.set(0,0,0);
+                santaGroup.rotation.set(0,0,0);
+                santaData.t += santaData.speed;
+                const currentT = santaData.t; 
+
+                if (santaData.t > 1.35) {
+                    santaData.t = 0;
+                    santaData.active = false;
+                    santaGroup.visible = false;
+                    letterObjects.forEach(obj => {
+                        obj.active = false;
+                        obj.sprite.opacity = 0;
+                        obj.sprite.material.opacity = 0;
+                        obj.sprite.visible = true;
+                        obj.isFading = false;
+                        if (obj.particleSystem) {
+                            scene.remove(obj.particleSystem);
+                            obj.particleSystem.geometry.dispose();
+                            obj.particleSystem.material.dispose();
+                            obj.particleSystem = null;
+                        }
+                    });
+                    setTimeout(() => { santaData.active = true; }, 5000);
+
+                } else {
+                    const posAttr = santaPoints.geometry.attributes.position;
+                    const particleCount = santaData.particles.length;
+                    const tempVecWorld = new THREE.Vector3();
+                    const zToTimeScale = 0.00025;
+                    const normalizedCurrentT = (currentT - 0.5) * 2;
+                    const safeNormT = Math.abs(normalizedCurrentT) < 0.001 ? 0.001 * Math.sign(normalizedCurrentT) : normalizedCurrentT;
+                    const currentRadius = 420 + 3000 * Math.pow(Math.abs(safeNormT), 4);
+                    const stretchFactor = 420 / Math.max(420, currentRadius); 
+
+                    for (let i = 0; i < particleCount; i++) {
+                        const pData = santaData.particles[i];
+                        const timeOffset = pData.baseZ * zToTimeScale * stretchFactor;
+                        let effectiveT = currentT + timeOffset;
+                        effectiveT = Math.max(0.001, Math.min(1.5, effectiveT));
+                        const pathData = getPathDataAtT(effectiveT);
+                        if (!pathData || isNaN(pathData.position.x)) continue;
+                        let currentBaseY = pData.baseY;
+                        let shakeY = 0;
+                        if (pData.type === 'dust') { shakeY = (Math.random()-0.5)*5; } else { shakeY = Math.sin(now * 15 + pData.noiseOffset) * 2.0; }
+                        currentBaseY += shakeY;
+                        tempVecWorld.copy(pathData.position);
+                        tempVecWorld.addScaledVector(pathData.right, pData.baseX);
+                        tempVecWorld.addScaledVector(pathData.up, currentBaseY);
+                        if (!isNaN(tempVecWorld.x)) {
+                            posAttr.setXYZ(i, tempVecWorld.x, tempVecWorld.y, tempVecWorld.z);
+                        }
+                    }
+                    posAttr.needsUpdate = true;
+
+                    const emitterT = Math.max(0.001, Math.min(1.5, currentT - 0.02)); 
+                    const emitterPD = getPathDataAtT(emitterT);
+                    if(emitterPD && !isNaN(emitterPD.position.x)) {
+                        for(let k=0; k<3; k++) spawnSantaSmoke(emitterPD.position);
+                    }
+
+                    letterObjects.forEach(obj => {
+                        if (!obj.active && santaData.t >= obj.triggerT) {
+                            obj.active = true;
+                            obj.sprite.material.opacity = 1.0;
+                            obj.appearTime = now; 
+                        }
+                        if (obj.active && !obj.isFading && (now - obj.appearTime > 5.0)) {
+                            obj.isFading = true;
+                            obj.sprite.visible = false;
+                            const { particles, velocities } = createLetterParticleSystem(obj.sprite.position);
+                            obj.particleSystem = particles;
+                            obj.particleVelocities = velocities;
+                            scene.add(obj.particleSystem);
+                        }
+                        if (obj.isFading && obj.particleSystem) {
+                            const ps = obj.particleSystem;
+                            const positions = ps.geometry.attributes.position.array;
+                            ps.material.opacity -= 0.02; 
+                            for(let i = 0; i < obj.particleVelocities.length; i++) {
+                                positions[i*3]    += obj.particleVelocities[i].x;
+                                positions[i*3+1] += obj.particleVelocities[i].y;
+                                positions[i*3+2] += obj.particleVelocities[i].z;
+                            }
+                            ps.geometry.attributes.position.needsUpdate = true;
+                            if (ps.material.opacity <= 0) {
+                                scene.remove(ps);
+                                ps.geometry.dispose();
+                                ps.material.dispose();
+                                obj.particleSystem = null;
+                            }
+                        }
+                    });
+                }
+            }
+
+            const ribbonColors = ribbonGeometry.attributes.color;
+            if (((__frameCounter & 1) === 0) || STATE.isExploded || STATE.explodeLevel > 0.01) {
+                // Kiểm tra chuyển trạng thái textMode để random lại vị trí hạt dư thừa
+                // --- FIX QUAN TRỌNG: TẮT HOÀN TOÀN HIỆU ỨNG CHỮ CŨ CỦA ÔNG GIÀ KHI VÀO CHẾ ĐỘ CHỮ ---
+                if (typeof letterTrailGroup !== 'undefined' && letterTrailGroup) {
+                    letterTrailGroup.visible = !STATE.isTextMode;
+                }
+                // Nếu đang ở text mode, duyệt qua tất cả các chữ cái ông già noel và tắt chúng đi
+                if(STATE.isTextMode && letterObjects) {
+                    letterObjects.forEach(obj => {
+                        if(obj.sprite) obj.sprite.visible = false;
+                        if(obj.particleSystem) obj.particleSystem.visible = false;
+                    });
+                }
+
+
+                if (STATE.isTextMode && !floatingSpareTargetsValid) {
+                    // Số lượng hạt dư thừa lớn nhất trong 4 nhóm
+                    let maxSpare = 0;
+                    [foliageData, ribbonData, starData, fillerData].forEach((ds, idx) => {
+                        if (ds.length > textTargets.length) {
+                            maxSpare = Math.max(maxSpare, ds.length - textTargets.length);
+                        }
+                    });
+                    floatingSpareTargets = generateFloatingSpareTargets(maxSpare);
+                    floatingSpareTargetsValid = true;
+                } else if (!STATE.isTextMode && floatingSpareTargetsValid) {
+                    floatingSpareTargets = [];
+                    floatingSpareTargetsValid = false;
+                }
+                [foliageData, ribbonData, starData, fillerData].forEach((ds,idx)=>{
+                    let geo; if(idx===0) geo=foliageGeometry; else if(idx===1) geo=ribbonGeometry; else if(idx===2) geo=starMesh.geometry; else geo=fillerMesh.geometry;
+                    const pos=geo.attributes.position;
+                    const colAttr = geo.attributes.color;
+                    for(let i=0;i<ds.length;i++){
+                        const d=ds[i]; 
+                        let target;
+
+                        // === YÊU CẦU 2: LÀM ĐẸP CHỮ (PARTICLE MAGIC - UNIFORM & SPARKLE) ===
+                        if(STATE.isTextMode) {
+                            if (i < textTargets.length) {
+                                const tObj = textTargets[i];
+                                target = tObj.vec;
+                                const isTop = tObj.isTopLine;
+
+                                if(idx === 0 && colAttr) {
+                                    if (isTop) {
+                                        // Dòng 1: GOLD (Đồng nhất màu Vàng Kim)
+                                        const baseR = 1.0; const baseG = 0.84; const baseB = 0.0;
+                                        // Hiệu ứng lấp lánh nhanh (cường độ sáng thay đổi)
+                                        const flicker = Math.sin(now * 15 + i * 0.1) * 0.5 + 0.5;
+                                        const extraSparkle = Math.pow(Math.random(), 5) * 1.5; // Tia sáng mạnh ngẫu nhiên
+                                        const intensity = 1.0 + flicker * 0.3 + extraSparkle;
+                                        colAttr.setXYZ(i, baseR * intensity, baseG * intensity, baseB * intensity);
+                                    } else {
+                                        // Dòng 2: DEEP PINK (Đồng nhất màu Hồng Đậm)
+                                        const baseR = 1.0; const baseG = 0.08; const baseB = 0.58; 
+                                        // Hiệu ứng lấp lánh nhanh
+                                        const flicker = Math.cos(now * 14 + i * 0.12) * 0.5 + 0.5;
+                                        const extraSparkle = Math.pow(Math.random(), 5) * 1.5; 
+                                        const intensity = 1.0 + flicker * 0.3 + extraSparkle;
+                                        colAttr.setXYZ(i, baseR * intensity, baseG * intensity, baseB * intensity);
+                                    }
+                                    // Rung động hạt nhẹ để tăng cảm giác lấp lánh
+                                    const jitterX = (Math.random() - 0.5) * 1.5;
+                                    const jitterY = (Math.random() - 0.5) * 1.5;
+                                    const jitterZ = (Math.random() - 0.5) * 1.5;
+                                    d.current.lerp(new THREE.Vector3(target.x + jitterX, target.y + jitterY, target.z + jitterZ), 0.15);
+                                } else {
+                                     d.current.lerp(target, 0.08);
+                                }
+                            } else {
+                                // Hạt dư thừa: Giữ vị trí random đã sinh ra khi vào chế độ chữ
+                                let spareIdx = i - textTargets.length;
+                                if (spareIdx < floatingSpareTargets.length) {
+                                    target = floatingSpareTargets[spareIdx];
+                                } else {
+                                    // Nếu thiếu, random tạm
+                                    target = new THREE.Vector3((Math.random()-0.5)*1200, (Math.random()-0.5)*800, (Math.random()-0.5)*800);
+                                }
+                                if(idx === 0 && colAttr) colAttr.setXYZ(i, 0.15, 0.15, 0.2); // Màu xanh đêm nhẹ
+                                d.current.lerp(target, 0.04);
+                            }
+                        } else {
+                            // === LOGIC CŨ ===
+                            if (idx === 1) {
+                                const twinkle = 0.5 + 0.5 * Math.sin(now * CONFIG.blinkSpeed + d.blinkOffset);
+                                let dist = Math.abs(d.t - STATE.runLightPos); if (dist > 0.5) dist = 1.0 - dist;
+                                let runBoost = 0; if (dist < CONFIG.runLightSize) { runBoost = (1.0 - dist / CONFIG.runLightSize); runBoost = Math.min(1, Math.pow(runBoost, 1.8)); }
+                                const intensity = CONFIG.baseLightIntensity + (twinkle * 0.2);
+                                if (runBoost > 0.0001) {
+                                    const mix = runBoost;
+                                    const br = d.origColor.r * intensity; const bg = d.origColor.g * intensity; const bb = d.origColor.b * intensity;
+                                    const wr = 1.0 * intensity; const wg = 1.0 * intensity; const wb = 1.0 * intensity;
+                                    const rr = THREE.MathUtils.lerp(br, wr, mix); const rg = THREE.MathUtils.lerp(bg, wg, mix); const rb = THREE.MathUtils.lerp(bb, wb, mix);
+                                    ribbonColors.setXYZ(i, rr, rg, rb);
+                                    try { const aSizeAttr = geo.getAttribute('aSize'); if (aSizeAttr) aSizeAttr.setX(i, d.baseSize * (1.0 + mix * 0.6)); } catch(e) {}
+                                } else {
+                                    ribbonColors.setXYZ(i, d.origColor.r * intensity, d.origColor.g * intensity, d.origColor.b * intensity);
+                                    try { const aSizeAttr = geo.getAttribute('aSize'); if (aSizeAttr) aSizeAttr.setX(i, d.baseSize); } catch(e) {}
+                                }
+                            }
+                            target = d.home.clone().add(d.explodeDir.clone().multiplyScalar(CONFIG.particleExplodeRadius * d.speed * STATE.explodeLevel));
+                            if(STATE.isExploded && STATE.explodeLevel > 0.8) { const driftX = Math.sin(time * CONFIG.driftSpeed + d.driftPhase) * CONFIG.driftAmp; const driftY = Math.cos(time * CONFIG.driftSpeed * 0.8 + d.driftPhase) * CONFIG.driftAmp * 0.5; const driftZ = Math.sin(time * CONFIG.driftSpeed * 1.2 + d.driftPhase) * CONFIG.driftAmp; d.current.x += (target.x + driftX - d.current.x) * 0.05; d.current.y += (target.y + driftY - d.current.y) * 0.05; d.current.z += (target.z + driftZ - d.current.z) * 0.05; } else { d.current.lerp(target, 0.1); }
+                            
+                            if (idx === 0 && colAttr) { const bright = THREE.MathUtils.lerp(1.0, 3.5, STATE.explodeLevel); colAttr.setXYZ(i, d.origColor.r * bright, d.origColor.g * bright, d.origColor.b * bright); }
+                        }
+                        
+                        pos.setXYZ(i,d.current.x,d.current.y,d.current.z);
+                    }
+                    pos.needsUpdate=true; if(idx===1) { ribbonColors.needsUpdate = true; try { const aSizeAttr = geo.getAttribute('aSize'); if (aSizeAttr) aSizeAttr.needsUpdate = true; } catch(e) {} } if(idx===0 && colAttr) colAttr.needsUpdate = true;
+                    });
+                }
+
+                if (typeof foliagePoints !== 'undefined' && foliagePoints && typeof ribbonPoints !== 'undefined' && ribbonPoints) {
+                    try {
+                        const fMat = foliagePoints.material; const rMat = ribbonPoints.material;
+                        const fDefaultSize = 10.0, fExplodeSize = 16.0; const rDefaultSize = 15.0, rExplodeSize = 24.0;
+                        let fTargetSize = (STATE.isExploded || STATE.explodeLevel > 0.01) ? fExplodeSize : fDefaultSize;
+                        let rTargetSize = (STATE.isExploded || STATE.explodeLevel > 0.01) ? rExplodeSize : rDefaultSize;
+                        let fTargetOpacity = THREE.MathUtils.lerp(1.0, 0.22, STATE.explodeLevel);
+                        let rTargetOpacity = THREE.MathUtils.lerp(0.95, 0.30, STATE.explodeLevel);
+                        
+                        if (STATE.isTextMode) {
+                            fTargetOpacity = 1.0; 
+                            rTargetOpacity = 1.0;
+                            fTargetSize = 19.0; // Tăng kích thước hạt chữ lên cho rõ
+                        } else if (STATE.explodeLevel > 0.8) { 
+                            fTargetOpacity = 0.6; rTargetOpacity = 0.7; fTargetSize = 12.0; rTargetSize = 18.0; try { fillerMesh.material.opacity += (0.6 - fillerMesh.material.opacity) * 0.06; } catch(e){} 
+                        }
+
+                        fMat.size = (fMat.size || fDefaultSize) + (fTargetSize - (fMat.size || fDefaultSize)) * 0.08;
+                        rMat.size = (rMat.size || rDefaultSize) + (rTargetSize - (rMat.size || rDefaultSize)) * 0.08;
+                        fMat.opacity = (fMat.opacity || 1.0) + (fTargetOpacity - (fMat.opacity || 1.0)) * 0.08;
+                        rMat.opacity = (rMat.opacity || 0.95) + (rTargetOpacity - (rMat.opacity || 0.95)) * 0.08;
+                    } catch(e) { }
+                }
+
+            try {
+                const shouldSoft = STATE.explodeLevel > 0.25;
+                if (foliagePoints && foliagePoints.material) { if (shouldSoft && !_foliageSoft) { foliagePoints.material.map = fuzzyTex; foliagePoints.material.needsUpdate = true; _foliageSoft = true; } else if (!shouldSoft && _foliageSoft) { foliagePoints.material.map = crispDotTex; foliagePoints.material.needsUpdate = true; _foliageSoft = false; } }
+                if (ribbonPoints && ribbonPoints.material) { if (shouldSoft && !_ribbonSoft) { ribbonPoints.material.map = fuzzyTex; ribbonPoints.material.needsUpdate = true; _ribbonSoft = true; } else if (!shouldSoft && _ribbonSoft) { ribbonPoints.material.map = crispDotTex; ribbonPoints.material.needsUpdate = true; _ribbonSoft = false; } }
+            } catch(e) {}
+
+            invM.copy(treeGroup.matrixWorld).invert(); const orbitRotation = now * CONFIG.boxOrbitSpeed; 
+            giftBoxes.forEach((c,i)=>{
+                const ud=c.userData; 
+                let targetWorldPos, targetLocalPos;
+
+                if(STATE.isTextMode) {
+                     c.scale.lerp(new THREE.Vector3(0,0,0), 0.1); 
+                } else if(STATE.isExploded && STATE.explodeLevel>0.2) {
+                    
+                    // --- YÊU CẦU 1: HẠ ĐỘ CAO HỘP QUÀ ---
+                    const angle = (i / 5) * Math.PI * 2 + orbitRotation; 
+                    const radius = 160; 
+                    
+                    const vec = new THREE.Vector3(Math.cos(angle) * radius, 0, Math.sin(angle) * radius);
+                    
+                    const tiltAxis = new THREE.Vector3(1, 0, 0); 
+                    const tiltAngle = 35 * (Math.PI / 180); 
+                    vec.applyAxisAngle(tiltAxis, tiltAngle);
+
+                    const centerCam = new THREE.Vector3(0, 0, -CONFIG.boxCircleDistance);
+                    const centerWorld = centerCam.applyMatrix4(camera.matrixWorld);
+                    
+                    // Thêm vector đã nghiêng vào tâm thế giới
+                    targetWorldPos = centerWorld.clone().add(vec);
+                    targetWorldPos.y += 10; // HẠ XUỐNG CÒN 10 (Trước là 100) để bay thấp hơn
+
+                    targetLocalPos = targetWorldPos.applyMatrix4(invM);
+                    
+                    c.position.lerp(targetLocalPos, 0.1); 
+                    c.lookAt(camera.position); 
+                    c.scale.lerp(new THREE.Vector3(CONFIG.boxScaleTarget, CONFIG.boxScaleTarget, CONFIG.boxScaleTarget), 0.09);
+                } else {
+                    c.position.lerp(ud.basePos,0.1); c.lookAt(0,c.position.y,0); c.rotateY(0); c.scale.lerp(new THREE.Vector3(1,1,1), 0.08);
+                }
+                const open=(STATE.isExploded && i===STATE.activeBoxIndex && !STATE.isTextMode);
+                ud.lid.rotation.x+=( (open?-Math.PI/1.5:0) - ud.lid.rotation.x)*0.15;
+                if(open){
+                    c.getWorldPosition(boxW);
+                    if (overlayPlane.userData.currentBoxIndex !== i) {
+                        overlayPlane.userData.currentBoxIndex = i; overlayPlane.userData.flyProgress = 0; overlayPlane.userData.flyTarget = 0;
+                        if (ud.texture) { if (overlayPlane.material && overlayPlane.material.uniforms) { overlayPlane.material.uniforms.uMap.value = ud.texture; overlayPlane.material.uniforms.opacity.value = 0.0; overlayPlane.material.uniforms.brightness.value = 0.8; } } else { const fb = createFallbackTexture(i, BOX_COLORS[i]); fb.needsUpdate = true; if (overlayPlane.material && overlayPlane.material.uniforms) { overlayPlane.material.uniforms.uMap.value = fb; overlayPlane.material.uniforms.opacity.value = 0.0; overlayPlane.material.uniforms.brightness.value = 0.8; } }
+                        const sp = boxW.clone().applyMatrix4(camera.matrixWorldInverse); overlayPlane.userData.startPos.copy(sp); overlayPlane.position.copy(sp); overlayPlane.scale.set(0.08,0.08,0.08);
+                    }
+                    const openFrac = Math.min(1, Math.max(0, (-ud.lid.rotation.x) / (Math.PI/1.5))); overlayPlane.userData.flyTarget = openFrac;
+                    const forward = new THREE.Vector3(0, 0, -300).applyQuaternion(camera.quaternion); const targetWorld = camera.position.clone().add(forward); const targetLocal = targetWorld.applyMatrix4(invM);
+                    c.position.lerp(targetLocal, 0.16); c.scale.lerp(new THREE.Vector3(CONFIG.boxSelectScale, CONFIG.boxSelectScale, CONFIG.boxSelectScale), 0.12);
+                } else {
+                    if (overlayPlane.userData.currentBoxIndex === i) overlayPlane.userData.flyTarget = 0;
+                    if (!STATE.isTextMode && !STATE.isExploded) c.position.lerp(ud.basePos,0.1); 
+                    if (!STATE.isTextMode) c.scale.lerp(new THREE.Vector3(1,1,1), 0.08);
+                }
+            });
+
+            if (STATE.activeBoxIndex === -1) {
+                overlayPlane.userData.currentBoxIndex = -1; if (overlayPlane.material && overlayPlane.material.uniforms) { overlayPlane.material.uniforms.opacity.value *= 0.8; }
+            } else {
+                const target = overlayPlane.userData.flyTarget || 0; overlayPlane.userData.flyProgress += (target - overlayPlane.userData.flyProgress) * 0.12;
+                let p = overlayPlane.userData.flyProgress; if (p < 0.0001) p = 0; if (p > 1) p = 1;
+                overlayPlane.position.lerpVectors(overlayPlane.userData.startPos, new THREE.Vector3(0,0,-500), p);
+                const s = THREE.MathUtils.lerp(0.08, 1, p); overlayPlane.scale.set(s,s,s);
+                if (overlayPlane.material && overlayPlane.material.uniforms) { overlayPlane.material.uniforms.opacity.value = p; overlayPlane.material.uniforms.brightness.value = THREE.MathUtils.lerp(0.8, 1.4, p); }
+                if (p === 0 && overlayPlane.userData.currentBoxIndex !== -1) overlayPlane.userData.currentBoxIndex = -1;
+            }
+            renderer.render(scene, camera);
+        }
+        animate(0); window.onresize=()=>{camera.aspect=window.innerWidth/window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth,window.innerHeight);};
+    </script>
+</body>
+</html>
